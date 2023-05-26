@@ -23,4 +23,4 @@
 from .PyanNet import PyanNet
 from .SSeRiouSS import SSeRiouSS
 
-__all__ = ["PyanNet", "SSeRiouSS"]
+__all__ = ["PyanNet", "SSeRiouSS", "PyanNetWavLM"]
