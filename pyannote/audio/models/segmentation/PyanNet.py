@@ -34,7 +34,6 @@ from pyannote.audio.core.task import Task
 from pyannote.audio.models.blocks.sincnet import SincNet
 from pyannote.audio.utils.params import merge_dict
 
-
 try:
     from transformers import WavLMModel
 
@@ -113,7 +112,9 @@ class PyanNetBase(Model):
             num_layers = transformer.pop("num_layers")
 
             transformer_layer = nn.TransformerEncoderLayer(last_dim, **transformer)
-            self.transformer = nn.TransformerEncoder(transformer_layer, num_layers=num_layers)
+            self.transformer = nn.TransformerEncoder(
+                transformer_layer, num_layers=num_layers
+            )
 
         if lstm["num_layers"] > 0:
             monolithic = lstm["monolithic"]
@@ -135,13 +136,16 @@ class PyanNetBase(Model):
                 self.lstm = nn.ModuleList(
                     [
                         nn.LSTM(
-                            last_dim if i == 0 else lstm["hidden_size"] * (2 if lstm["bidirectional"] else 1),
+                            last_dim
+                            if i == 0
+                            else lstm["hidden_size"]
+                            * (2 if lstm["bidirectional"] else 1),
                             **one_layer_lstm,
                         )
                         for i in range(num_layers)
                     ]
                 )
-            
+
             last_dim = lstm["hidden_size"] * (2 if lstm["bidirectional"] else 1)
 
         if linear["num_layers"] < 1:
@@ -154,7 +158,8 @@ class PyanNetBase(Model):
                     [
                         last_dim,
                     ]
-                    + [self.hparams.linear["hidden_size"]] * self.hparams.linear["num_layers"]
+                    + [self.hparams.linear["hidden_size"]]
+                    * self.hparams.linear["num_layers"]
                 )
             ]
         )
@@ -163,7 +168,9 @@ class PyanNetBase(Model):
         if self.hparams.linear["num_layers"] > 0:
             in_features = self.hparams.linear["hidden_size"]
         elif self.hparams.lstm["num_layers"] > 0:
-            in_features = self.hparams.lstm["hidden_size"] * (2 if self.hparams.lstm["bidirectional"] else 1)
+            in_features = self.hparams.lstm["hidden_size"] * (
+                2 if self.hparams.lstm["bidirectional"] else 1
+            )
         else:
             in_features = self.hparams.base_feature_dim
 
@@ -229,13 +236,18 @@ class PyanNet(PyanNetBase):
     def __init__(
         self,
         sincnet: dict = None,
+        base_feature_dim: int = 60,
         **kwargs,
     ):
         sincnet = merge_dict(self.SINCNET_DEFAULTS, sincnet)
         sincnet["sample_rate"] = kwargs.get("sample_rate", 16000)
         self.save_hyperparameters("sincnet")
 
-        super().__init__(base_net=SincNet(**self.hparams.sincnet), base_feature_dim=60, **kwargs)
+        super().__init__(
+            base_net=SincNet(**self.hparams.sincnet),
+            base_feature_dim=base_feature_dim,
+            **kwargs,
+        )
 
 
 class WavLMWrapper(nn.Module):
@@ -243,9 +255,11 @@ class WavLMWrapper(nn.Module):
         super().__init__()
         self.wavlm = wavlm
         self.use_weighted_sum = use_weighted_sum
-        
+
         if self.use_weighted_sum:
-            self.sum_weights = nn.Parameter(torch.randn(self.wavlm.config.num_hidden_layers + 1))
+            self.sum_weights = nn.Parameter(
+                torch.randn(self.wavlm.config.num_hidden_layers + 1)
+            )
 
     def forward(self, wavs):
         # squeeze channel dimension if present
@@ -253,14 +267,20 @@ class WavLMWrapper(nn.Module):
             wavs = wavs.squeeze(1)
 
         att_masks = torch.ones_like(wavs).to(torch.int32)
-        outputs = self.wavlm(input_values=wavs, attention_mask=att_masks, output_hidden_states=self.use_weighted_sum)
+        outputs = self.wavlm(
+            input_values=wavs,
+            attention_mask=att_masks,
+            output_hidden_states=self.use_weighted_sum,
+        )
 
         if self.use_weighted_sum:
             stacked = torch.stack(outputs.hidden_states, dim=-1)
             summed = stacked @ F.softmax(self.sum_weights, dim=0)
             return rearrange(summed, "batch frame feature -> batch feature frame")
         else:
-            return rearrange(outputs.last_hidden_state, "batch frame feature -> batch feature frame")
+            return rearrange(
+                outputs.last_hidden_state, "batch frame feature -> batch feature frame"
+            )
 
 
 class PyanNetWavLM(PyanNetBase):
@@ -281,6 +301,7 @@ class PyanNetWavLM(PyanNetBase):
         wavlm: Union[WavLMModel, str],
         freeze_wavlm_weights: bool = True,
         use_weighted_sum: bool = False,
+        base_feature_dim: Optional[int] = None,
         **kwargs,
     ):
         if not TRANSFORMERS_IS_AVAILABLE:
@@ -290,9 +311,14 @@ class PyanNetWavLM(PyanNetBase):
             wavlm = WavLMModel.from_pretrained(wavlm)
 
         self.save_hyperparameters("freeze_wavlm_weights", "use_weighted_sum")
+
+        # needed for loading a model from a checkpoint
+        if base_feature_dim is None:
+            base_feature_dim = wavlm.config.hidden_size
+
         super().__init__(
             base_net=WavLMWrapper(wavlm, use_weighted_sum=use_weighted_sum),
-            base_feature_dim=wavlm.config.hidden_size,
+            base_feature_dim=base_feature_dim,
             **kwargs,
         )
 
