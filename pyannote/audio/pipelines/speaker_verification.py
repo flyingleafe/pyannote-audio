@@ -20,10 +20,12 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
+from abc import abstractmethod
 import warnings
 from functools import cached_property
 from pathlib import Path
 from typing import Text, Union
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -73,6 +75,14 @@ try:
     ONNX_IS_AVAILABLE = True
 except ImportError:
     ONNX_IS_AVAILABLE = False
+
+
+try:
+    from wespeaker.models.speaker_model import get_speaker_model
+
+    WESPEAKER_IS_AVAILABLE = True
+except ImportError:
+    WESPEAKER_IS_AVAILABLE = False
 
 
 class NeMoPretrainedSpeakerEmbedding(BaseInference):
@@ -522,7 +532,7 @@ class WavLMPretrainedSpeakerEmbedding(BaseInference):
         return embeddings
 
 
-class ONNXWeSpeakerPretrainedSpeakerEmbedding(BaseInference):
+class WeSpeakerPretrainedSpeakerEmbeddingBase(BaseInference):
     """Pretrained WeSpeaker speaker embedding
 
     Parameters
@@ -547,66 +557,9 @@ class ONNXWeSpeakerPretrainedSpeakerEmbedding(BaseInference):
     >>> embeddings = get_embedding(waveforms, masks=binary_masks)
     """
 
-    def __init__(
-        self,
-        embedding: Text = "hbredin/wespeaker-voxceleb-resnet34-LM",
-        device: torch.device = None,
-    ):
-        if not ONNX_IS_AVAILABLE:
-            raise ImportError(
-                f"'onnxruntime' must be installed to use '{embedding}' embeddings."
-            )
-
-        super().__init__()
-
-        if not Path(embedding).exists():
-            try:
-                embedding = hf_hub_download(
-                    repo_id=embedding,
-                    filename="speaker-embedding.onnx",
-                )
-            except RepositoryNotFoundError:
-                raise ValueError(
-                    f"Could not find '{embedding}' on huggingface.co nor on local disk."
-                )
-
-        self.embedding = embedding
-
-        self.to(device or torch.device("cpu"))
-
-    def to(self, device: torch.device):
-        if not isinstance(device, torch.device):
-            raise TypeError(
-                f"`device` must be an instance of `torch.device`, got `{type(device).__name__}`"
-            )
-
-        if device.type == "cpu":
-            providers = ["CPUExecutionProvider"]
-        elif device.type == "cuda":
-            providers = [
-                (
-                    "CUDAExecutionProvider",
-                    {
-                        "cudnn_conv_algo_search": "DEFAULT",  # EXHAUSTIVE / HEURISTIC / DEFAULT
-                    },
-                )
-            ]
-        else:
-            warnings.warn(
-                f"Unsupported device type: {device.type}, falling back to CPU"
-            )
-            device = torch.device("cpu")
-            providers = ["CPUExecutionProvider"]
-
-        sess_options = ort.SessionOptions()
-        sess_options.inter_op_num_threads = 1
-        sess_options.intra_op_num_threads = 1
-        self.session_ = ort.InferenceSession(
-            self.embedding, sess_options=sess_options, providers=providers
-        )
-
-        self.device = device
-        return self
+    @abstractmethod
+    def compute_embeddings(self, features: torch.Tensor) -> np.ndarray:
+        pass
 
     @cached_property
     def sample_rate(self) -> int:
@@ -616,9 +569,7 @@ class ONNXWeSpeakerPretrainedSpeakerEmbedding(BaseInference):
     def dimension(self) -> int:
         dummy_waveforms = torch.rand(1, 1, 16000)
         features = self.compute_fbank(dummy_waveforms)
-        embeddings = self.session_.run(
-            output_names=["embs"], input_feed={"feats": features.numpy()}
-        )[0]
+        embeddings = self.compute_embeddings(features)
         _, dimension = embeddings.shape
         return dimension
 
@@ -639,9 +590,7 @@ class ONNXWeSpeakerPretrainedSpeakerEmbedding(BaseInference):
                 middle = (lower + upper) // 2
                 continue
 
-            embeddings = self.session_.run(
-                output_names=["embs"], input_feed={"feats": features.numpy()}
-            )[0]
+            embeddings = self.compute_embeddings(features)
 
             if np.any(np.isnan(embeddings)):
                 lower = middle
@@ -695,6 +644,7 @@ class ONNXWeSpeakerPretrainedSpeakerEmbedding(BaseInference):
 
         return features - torch.mean(features, dim=1, keepdim=True)
 
+
     def __call__(
         self, waveforms: torch.Tensor, masks: torch.Tensor = None
     ) -> np.ndarray:
@@ -719,9 +669,7 @@ class ONNXWeSpeakerPretrainedSpeakerEmbedding(BaseInference):
         _, num_frames, _ = features.shape
 
         if masks is None:
-            embeddings = self.session_.run(
-                output_names=["embs"], input_feed={"feats": features.numpy(force=True)}
-            )[0]
+            embeddings = self.compute_embeddings(features)
 
             return embeddings
 
@@ -741,12 +689,132 @@ class ONNXWeSpeakerPretrainedSpeakerEmbedding(BaseInference):
             if masked_feature.shape[0] < self.min_num_frames:
                 continue
 
-            embeddings[f] = self.session_.run(
-                output_names=["embs"],
-                input_feed={"feats": masked_feature.numpy(force=True)[None]},
-            )[0][0]
+            embeddings[f] = self.compute_embeddings(masked_feature.unsqueeze(0))[0]
 
         return embeddings
+
+
+class WeSpeakerPretrainedSpeakerEmbeddingOnnx(WeSpeakerPretrainedSpeakerEmbeddingBase):
+    """Pretrained WeSpeaker speaker embedding
+
+    Parameters
+    ----------
+    embedding : str
+        Path to WeSpeaker pretrained speaker embedding
+    device : torch.device, optional
+        Device
+
+    Usage
+    -----
+    >>> get_embedding = WeSpeakerPretrainedSpeakerEmbedding("wespeaker.xxxx.onnx")
+    >>> assert waveforms.ndim == 3
+    >>> batch_size, num_channels, num_samples = waveforms.shape
+    >>> assert num_channels == 1
+    >>> embeddings = get_embedding(waveforms)
+    >>> assert embeddings.ndim == 2
+    >>> assert embeddings.shape[0] == batch_size
+
+    >>> assert binary_masks.ndim == 1
+    >>> assert binary_masks.shape[0] == batch_size
+    >>> embeddings = get_embedding(waveforms, masks=binary_masks)
+    """
+    def __init__(
+        self,
+        embedding: Text = "speechbrain/spkrec-ecapa-voxceleb",
+        device: torch.device = None,
+    ):
+        if not ONNX_IS_AVAILABLE:
+            raise ImportError(
+                f"'onnxruntime' must be installed to use '{embedding}' embeddings. "
+            )
+
+        super().__init__()
+
+        self.embedding = embedding
+
+        self.to(device or torch.device("cpu"))
+
+    def to(self, device: torch.device):
+        if not isinstance(device, torch.device):
+            raise TypeError(
+                f"`device` must be an instance of `torch.device`, got `{type(device).__name__}`"
+            )
+
+        if device.type == "cpu":
+            providers = ["CPUExecutionProvider"]
+        elif device.type == "cuda":
+            providers = ["CUDAExecutionProvider"]
+        else:
+            warnings.warn(
+                f"Unsupported device type: {device.type}, falling back to CPU"
+            )
+            device = torch.device("cpu")
+            providers = ["CPUExecutionProvider"]
+
+        sess_options = ort.SessionOptions()
+        sess_options.inter_op_num_threads = 1
+        sess_options.intra_op_num_threads = 1
+        self.session_ = ort.InferenceSession(
+            self.embedding, sess_options=sess_options, providers=providers
+        )
+
+        self.device = device
+        return self
+
+
+    def compute_embeddings(self, feats: torch.Tensor) -> np.ndarray:
+        """Compute embeddings
+
+        Parameters
+        ----------
+        feats : (..., batch_size, num_frames, num_mel_bins)
+
+        Returns
+        -------
+        embeddings : (..., batch_size, dimension)
+        """
+        return self.session_.run(
+            output_names=["embs"], input_feed={"feats": feats.numpy(force=True)}
+        )[0]
+
+
+class WeSpeakerPretrainedSpeakerEmbeddingTorch(WeSpeakerPretrainedSpeakerEmbeddingBase):
+    def __init__(
+        self,
+        embedding: Text = "speechbrain/spkrec-ecapa-voxceleb",
+        device: torch.device = None,
+    ) -> None:
+        if not WESPEAKER_IS_AVAILABLE:
+            raise ImportError(
+                f"'wespeaker' must be installed to use '{embedding}' embeddings. "
+            )
+
+        super().__init__()
+        self.model = get_speaker_model(Path(embedding).stem.split('.')[-1])()
+        state_dict = torch.load(embedding)
+        self.model.load_state_dict(state_dict, strict=False)
+        self.model.eval()
+
+        self.to(device or torch.device("cpu"))
+
+    def to(self, device: torch.device):
+        self.model.to(device)
+        self.device = device
+        return self
+
+    def compute_embeddings(self, feats: torch.Tensor) -> np.ndarray:
+        """Compute embeddings
+
+        Parameters
+        ----------
+        feats : (..., batch_size, num_frames, num_mel_bins)
+
+        Returns
+        -------
+        embeddings : (..., batch_size, dimension)
+        """
+        with torch.no_grad():
+            return self.model(feats.to(self.device)).cpu().numpy(force=True)
 
 
 class PyannoteAudioPretrainedSpeakerEmbedding(BaseInference):
@@ -897,11 +965,11 @@ def PretrainedSpeakerEmbedding(
     elif isinstance(embedding, str) and "wavlm" in embedding:
         return WavLMPretrainedSpeakerEmbedding(embedding, device=device)
 
-    elif isinstance(embedding, str) and "wespeaker" in embedding:
-        return WeSpeakerPretrainedSpeakerEmbedding(embedding, device=device)
+    elif isinstance(embedding, str) and "wespeaker" in embedding and "onnx" in embedding:
+        return WeSpeakerPretrainedSpeakerEmbeddingOnnx(embedding, device=device)
 
     elif isinstance(embedding, str) and "wespeaker" in embedding:
-        return ONNXWeSpeakerPretrainedSpeakerEmbedding(embedding, device=device)
+        return WeSpeakerPretrainedSpeakerEmbeddingTorch(embedding, device=device)
 
     else:
         # fallback to pyannote in case we are loading a local model

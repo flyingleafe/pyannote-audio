@@ -50,7 +50,7 @@ class Pipeline(_Pipeline):
     @classmethod
     def from_pretrained(
         cls,
-        checkpoint_path: Union[Text, Path],
+        checkpoint_path_or_cfg: Union[Text, Path, Dict],
         hparams_file: Union[Text, Path] = None,
         use_auth_token: Union[Text, None] = None,
         cache_dir: Union[Path, Text] = CACHE_DIR,
@@ -71,55 +71,59 @@ class Pipeline(_Pipeline):
             Path to model cache directory. Defauorch/pyannote" when unset.
         """
 
-        checkpoint_path = str(checkpoint_path)
-
-        if os.path.isfile(checkpoint_path):
-            config_yml = checkpoint_path
+        if isinstance(checkpoint_path_or_cfg, Dict):
+            config = checkpoint_path_or_cfg
 
         else:
-            if "@" in checkpoint_path:
-                model_id = checkpoint_path.split("@")[0]
-                revision = checkpoint_path.split("@")[1]
+            checkpoint_path = str(checkpoint_path_or_cfg)
+
+            if os.path.isfile(checkpoint_path):
+                config_yml = checkpoint_path
+
             else:
-                model_id = checkpoint_path
-                revision = None
+                if "@" in checkpoint_path:
+                    model_id = checkpoint_path.split("@")[0]
+                    revision = checkpoint_path.split("@")[1]
+                else:
+                    model_id = checkpoint_path
+                    revision = None
 
-            try:
-                config_yml = hf_hub_download(
-                    model_id,
-                    PIPELINE_PARAMS_NAME,
-                    repo_type="model",
-                    revision=revision,
-                    library_name="pyannote",
-                    library_version=__version__,
-                    cache_dir=cache_dir,
-                    # force_download=False,
-                    # proxies=None,
-                    # etag_timeout=10,
-                    # resume_download=False,
-                    use_auth_token=use_auth_token,
-                    # local_files_only=False,
-                    # legacy_cache_layout=False,
-                )
+                try:
+                    config_yml = hf_hub_download(
+                        model_id,
+                        PIPELINE_PARAMS_NAME,
+                        repo_type="model",
+                        revision=revision,
+                        library_name="pyannote",
+                        library_version=__version__,
+                        cache_dir=cache_dir,
+                        # force_download=False,
+                        # proxies=None,
+                        # etag_timeout=10,
+                        # resume_download=False,
+                        use_auth_token=use_auth_token,
+                        # local_files_only=False,
+                        # legacy_cache_layout=False,
+                    )
 
-            except RepositoryNotFoundError:
-                print(
-                    f"""
+                except RepositoryNotFoundError:
+                    print(
+                        f"""
 Could not download '{model_id}' pipeline.
 It might be because the pipeline is private or gated so make
 sure to authenticate. Visit https://hf.co/settings/tokens to
 create your access token and retry with:
 
-   >>> Pipeline.from_pretrained('{model_id}',
-   ...                          use_auth_token=YOUR_AUTH_TOKEN)
+>>> Pipeline.from_pretrained('{model_id}',
+...                          use_auth_token=YOUR_AUTH_TOKEN)
 
 If this still does not work, it might be because the pipeline is gated:
 visit https://hf.co/{model_id} to accept the user conditions."""
-                )
-                return None
+                    )
+                    return None
 
-        with open(config_yml, "r") as fp:
-            config = yaml.load(fp, Loader=yaml.SafeLoader)
+            with open(config_yml, "r") as fp:
+                config = yaml.load(fp, Loader=yaml.SafeLoader)
 
         if "version" in config:
             check_version(
